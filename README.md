@@ -8,99 +8,156 @@
 
 ---
 
-## What this project does
+## Overview
 
-Every server CPU generates heat that has to be carried away by a coolant loop — a pump pushes liquid past the chip, and that liquid carries the heat off to be dumped elsewhere.
+**Problem:**
+Liquid-cooled server racks face a direct trade-off: a faster pump improves cooling but consumes power that grows close to cubically with speed, while a slower pump saves energy but risks the CPU exceeding safe operating temperatures. Neither "run it slow to save power" nor "run it fast to be safe" is a defensible engineering answer without knowing exactly where the trade-off actually sits.
 
-Run the pump faster, and the chip stays cooler — but the pump itself burns more electricity, and that cost grows very fast, not gradually. Run the pump slower, and you save power — but risk the chip overheating.
+**Approach:**
+Built a coupled fluid-thermal model in MATLAB Simscape (pump → coolant loop → cold plate → CPU thermal mass), validated every governing relationship against hand calculations, then used Python (`matlab.engine`) to automate a full parameter sweep across pump speeds and CPU heat loads. A Python optimizer then scans the results to find, for each heat load, the lowest-power pump speed that still keeps the CPU under a defined thermal safety limit.
 
-**This project builds a simulated version of that cooling loop, and automatically finds the slowest — and therefore cheapest — pump speed that still keeps the chip safely cool, across a wide range of realistic chip power levels — from a light 40W load up to a demanding 500W load.**
-
-> **Note on scope:** this models the cooling loop for a *single CPU* (one "socket," in data center terms) — the kind of per-chip cold plate found inside a server. A full server rack contains many CPUs plus other components, so a whole rack's total heat output is much larger than the range studied here. This project optimizes one cooling unit — the building block of a much bigger system.
-
----
-
-## The Science, in Plain Terms
-
-### 1. Heat has to go somewhere
-
-A CPU under load doesn't just get hot and stay hot forever — it heats up quickly at first, then levels off once it's losing heat to the coolant just as fast as it's generating it. This "leveling off" point is called **steady state**, and it's governed by a simple balance:
-
-> **Heat coming in = Heat leaving**
-
-If a chip generates 65 Watts of heat, the cooling system has to carry away exactly 65 Watts once things settle — no more, no less. This is just conservation of energy, the same principle behind why a cup of coffee eventually cools to room temperature and stops.
-
-### 2. How fast heat leaves depends on how effectively the coolant "grabs" it
-
-Heat moves from the hot chip into the moving coolant through a process called **convection** — think of it like a river washing heat away from a warm rock. As the pump spins faster, the coolant moves faster and becomes more effective at pulling heat away — but with **diminishing returns**. Doubling the flow rate doesn't double the cooling effectiveness; each extra bit of speed buys progressively less benefit. This is exactly why every curve in the plot above flattens out as pump speed increases.
-
-### 3. Pumping fluid isn't free — and it gets expensive fast
-
-Pushing liquid through a loop takes energy, and for the type of pump used here (a centrifugal pump — the same basic design used in everything from car engines to home water pumps), the power required grows roughly with the **cube** of its speed. Practically: double the pump speed, and the power cost can rise closer to **8×**, not 2×. This is a well-known real-world relationship (a pump "affinity law"), and it's exactly why blindly running a pump at max speed "to be safe" is wasteful — you pay a steep, escalating price for cooling gains that themselves are shrinking.
-
-### 4. Putting it together — the actual optimization
-
-For each chip power level, the simulation runs across a range of pump speeds, tracking both the chip's final temperature and the pump's power draw at each one. The answer, for each power level, is simple: **the slowest pump speed that still keeps the chip under a safe temperature limit.** Any slower risks overheating; any faster just burns extra power for no real benefit.
+**Result:**
+Across the tested heat load range, pump power required to stay thermally safe scales dramatically — from under 2W at light loads up to several hundred watts as heat load approaches the design's cooling limit. The model correctly identifies both the power-limited regime (where the pump's own minimum speed is already sufficient) and the thermally-limited regime (where speed must actively increase to hold temperature under the safety line).
 
 ---
 
-## How It Was Built
+## Tools & Environment
 
-| Stage | Tool | What Happens |
+| Tool | Version | Purpose |
 |---|---|---|
-| Physical model | MATLAB Simscape | A real, physics-based simulation of coolant flow, pump behavior, and heat transfer — not a simplified spreadsheet formula |
-| Validation | Hand calculations | Every part of the model (heating curve, steady-state temperature, pump flow rate) was checked by hand against the simulation before trusting it |
-| Automation | Python (`matlab.engine`) | Python programmatically runs the simulation dozens of times, sweeping across pump speeds and chip power levels, with zero manual clicking |
-| Optimization | Python | For each chip power level, the script scans the results and picks the lowest-power pump speed that keeps the chip safe |
+| MATLAB | R2024a | Simulation environment |
+| Simscape (Thermal Liquid + Thermal domains) | R2024a | Physics-based pump, coolant, and heat transfer modeling |
+| Python | 3.11 | Automation, optimization, plotting |
+| `matlab.engine` | 24.1 | Python ↔ MATLAB bridge |
+| pandas / numpy | latest | Data handling |
+| matplotlib | latest | Result visualization |
+
+---
+
+## System Architecture
+
+```
+Reservoir (inlet) → Centrifugal Pump → Pipe → Coolant Chamber ⇄ Convective Heat Transfer ⇄ CPU Thermal Mass ← Heat Flow Source
+                                                                                                                        ↓
+                                                                                          Pipe → Reservoir (outlet)
+```
+
+The model couples two Simscape physical domains:
+- **Thermal Liquid domain** — pump, piping, and coolant chamber, governing flow rate and pressure
+- **Thermal domain** — CPU heat generation and thermal mass
+
+A `Convective Heat Transfer` block bridges the two domains, computing `Q = h·A·(T_cpu − T_coolant)`, with `h` calculated dynamically from coolant flow rate via a MATLAB Function block — rather than held constant — since a fixed `h` was found during validation to eliminate the entire trade-off (see Limitations).
+
+---
+
+## Methodology
+
+### 1. Modeling assumptions
+
+- CPU and cold-plate modeled as a single lumped thermal mass (0.08 kg, cp = 900 J/kg·K) — valid for a small, conductive component with negligible internal temperature gradient
+- Convective heat transfer coefficient modeled as flow-dependent: `h = C·ṁ^0.8`, based on the flow-exponent form of the Dittus–Boelter turbulent convection correlation, with `C` calibrated against a literature-realistic `h` at a representative flow rate
+- Centrifugal pump parameterized from a manufacturer-style performance curve (nominal capacity 45 lpm @ 40m head, reference speed 1770 rpm)
+- Coolant is water; inlet/outlet reservoirs modeled as fixed-pressure boundaries rather than a fully closed recirculating loop
+- CPU heat load held constant per simulation run (40–500 W range tested), representing a steady operating condition rather than a dynamic workload
+
+### 2. Validation
+
+Every governing relationship was checked against hand calculations before being trusted in automation:
+
+| Check | Method | Result |
+|---|---|---|
+| Transient thermal response | Step heat input, compared to theoretical exponential charging curve (`τ = m·cp / hA`) | Matched within simulation resolution |
+| Steady-state energy balance | `T_cpu = T_coolant + Q/(hA)` at three heat loads | Within ~1% |
+| Pump flow law | `V̇ = D·N` (fixed-displacement pump, prior to centrifugal pump calibration) | Within 0.2% |
+| Pump power scaling | Compared simulated power growth across doubling speed intervals | Consistent with cubic centrifugal pump affinity law |
+
+### 3. Test scenarios
+
+- **Full factorial sweep:** 12 CPU heat loads (40–500 W) × 11 pump speeds (40–350 rad/s, restricted to the pump's confirmed valid operating region — see Limitations), run automatically via Python
+- **Optimization:** for each heat load, minimum pump power subject to CPU temperature remaining under 368.15 K (95°C)
 
 ---
 
 ## Results
 
-The full sweep covers 12 chip power levels (40–500W) and pump speeds from 40 to 200 rad/s. The optimizer found three distinct regimes:
+**Key plots:**
+Temperature vs. pump speed for every tested heat load, with the thermal safety limit overlaid and each heat load's optimal (minimum-power, thermally-safe) point circled.
+
+**Quantified comparison:**
 
 | Heat Load (W) | Optimal Speed (rad/s) | CPU Temp (K) | Pump Power (W) |
 |---|---|---|---|
 | 40  | 40  | 309.7 | 1.62 |
-| 65  | 40  | 320.1 | 1.62 |
-| 90  | 40  | 330.4 | 1.62 |
-| 115 | 40  | 340.8 | 1.62 |
 | 150 | 40  | 355.3 | 1.62 |
 | 200 | 60  | 364.1 | 9.09 |
-| 250 | 100 | 359.8 | 45.77 |
-| 300 | 125 | 362.0 | 89.84 |
-| 350 | 150 | 363.7 | 155.42 |
-| 400 | 175 | 365.1 | 246.83 |
-| 450 | 200 | 366.3 | 368.39 |
-| 500 | — | — | **no speed in the tested range (up to 200 rad/s) kept it under the thermal limit** |
+| 350 | 150 | 363.7 | 155.4 |
+| 450 | 200 | 366.3 | 368.4 |
+| 500 | — | — | no speed in the tested range kept CPU temperature under the safety limit |
 
-**Three regimes, one plot:**
+Pump power required to stay thermally safe rises **over 200×** between the power-limited regime (40–150 W) and the thermally-limited regime's upper end (450 W) — the central quantified finding of the project.
 
-1. **40–150W — power-limited.** The pump's own lowest usable speed already cools these loads with margin to spare. There's nothing to optimize here except "don't run the pump any faster than it needs to be."
-2. **200–450W — thermally-limited.** This is the real trade-off zone. Required pump speed climbs steadily, and pump power explodes — from 1.62W to 368.39W, a **227× increase**, to hold the chip just under its safety limit.
-3. **500W — infeasible within the tested range.** No pump speed up to 200 rad/s kept the chip safe. This either marks a genuine limit of this cooling design, or simply means a higher speed than tested would be needed — worth testing further before treating it as a hard ceiling.
+**Honest limitations:**
+- The convective coefficient correlation (`h = C·ṁ^0.8`) is a calibrated approximation, not derived from cold-plate channel geometry — real fidelity would require CFD or a manufacturer datasheet
+- Below ~33 rad/s, the centrifugal pump produces zero or negative pressure rise (outside its valid operating curve); this region was identified via a pressure-rise sign check and excluded from all sweeps and optimization
+- At 500 W, no speed up to 200 rad/s kept the CPU safe — this may indicate a genuine design limit, or simply that higher untested speeds would succeed; it has not been resolved either way
+- CPU heat load is constant per run; a real server workload varies over time, which this steady-state model does not capture
+- The coolant loop uses two independent pressure reservoirs rather than a closed recirculating loop
 
 ---
 
-## Try It Yourself
+## Repository Structure
 
-```bash
-python scripts/sweep_pump_speed.py       # runs the full simulation sweep
-python scripts/optimize.py               # finds the optimal pump speed per chip power level
-python scripts/compute_optimal_power.py  # records the pump power cost at each optimal point
-python scripts/plot_final_tradeoff.py    # generates the plot above
+```
+├── models/
+│   └── server_cooling_loop_v2_working.slx
+├── scripts/
+│   ├── sweep_pump_speed.py
+│   ├── optimize.py
+│   ├── compute_optimal_power.py
+│   └── plot_final_tradeoff.py
+├── results/
+│   ├── full_sweep_final.csv
+│   ├── optimization_results.csv
+│   ├── optimal_power.csv
+│   └── final_tradeoff_plot.png
+└── README.md
 ```
 
-Requires MATLAB with Simscape, and Python 3.11 with the MATLAB Engine API installed.
+---
+
+## How to Run
+
+```bash
+# 1. Create and activate a Python 3.11 virtual environment
+#    (required for MATLAB R2024a's matlab.engine compatibility)
+
+# 2. Install dependencies
+pip install numpy pandas matplotlib
+
+# 3. Install the MATLAB Engine API for Python
+#    (run from <MATLAB_ROOT>/extern/engines/python)
+
+# 4. Run the pipeline
+python scripts/sweep_pump_speed.py       # full parameter sweep
+python scripts/optimize.py               # find minimum-power feasible points
+python scripts/compute_optimal_power.py  # record pump power at optimal points
+python scripts/plot_final_tradeoff.py    # generate the annotated trade-off plot
+```
 
 ---
 
-## Engineering Notes Worth Knowing
+## What I'd Do With More Time
 
-- The convective heat transfer coefficient (`h`) is modeled as flow-dependent, `h = C·ṁ^0.8` — a fixed value made pump speed almost irrelevant to cooling and was corrected after being caught during validation.
-- The centrifugal pump has a genuine minimum operating speed (below ~33 rad/s it produces no real pressure rise); this floor was identified and excluded from the valid sweep range.
-- Every governing relationship (energy balance, transient thermal response, pump flow law) was validated against hand calculations before any automation was trusted.
+- Replace the calibrated `h = C·ṁ^0.8` correlation with a CFD-derived or manufacturer-sourced correlation specific to the actual cold-plate channel geometry
+- Extend the pump speed sweep above 200 rad/s to resolve whether 500 W is a genuine design limit
+- Model a closed recirculating loop instead of independent pressure reservoirs
+- Replace constant heat load with a time-varying server workload profile (idle → burst → idle)
+- Cross-validate the centrifugal pump's performance curve against a real manufacturer datasheet rather than representative values
 
 ---
 
-*B.E. Mechanical Engineering · M.Sc. Process, Energy & Environmental Systems Engineering, TU Berlin*
+## References
+
+- Dittus, F.W. and Boelter, L.M.K. — turbulent forced convection correlation (basis for the flow-dependent `h` model)
+- MathWorks Simscape Fluids documentation — Thermal Liquid domain component library
+- Manufacturer-style centrifugal pump performance curve parameters (nominal capacity/head, reference speed) used for pump calibration
