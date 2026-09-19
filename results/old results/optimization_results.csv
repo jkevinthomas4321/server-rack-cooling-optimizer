@@ -1,6 +1,0 @@
-heat_load_W,status,optimal_speed_rad_s,cpu_temp_K,pump_power_W
-40,OK,40.0,309.73,1.62
-65,OK,40.0,320.08,1.62
-90,OK,40.0,330.43,1.62
-115,OK,40.0,340.78,1.62
-150,OK,40.0,355.27,1.62
