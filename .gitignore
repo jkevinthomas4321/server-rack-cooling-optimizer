@@ -14,3 +14,7 @@ __pycache__/
 Thumbs.db
 
 # results/*.csv
+# Tooling
+.pytest_cache/
+*.egg-info/
+.venv/

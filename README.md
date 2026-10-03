@@ -3,7 +3,7 @@
 *A physics-based simulation, automated with Python, that answers a simple question: how hard does a cooling pump actually need to work?*
 
 <p align="center">
-  <img src="results/final_plot.png" width="700">
+  <img src="results/tradeoff_plot.png" width="700">
 </p>
 
 ---
@@ -14,7 +14,7 @@
 Liquid-cooled server racks face a direct trade-off: a faster pump improves cooling but consumes power that grows close to cubically with speed, while a slower pump saves energy but risks the CPU exceeding safe operating temperatures. Neither "run it slow to save power" nor "run it fast to be safe" is a defensible engineering answer without knowing exactly where the trade-off actually sits.
 
 **Approach:**
-Built a coupled fluid-thermal model in MATLAB Simscape (pump → coolant loop → cold plate → CPU thermal mass), validated every governing relationship against hand calculations, then used Python (`matlab.engine`) to automate a full parameter sweep across pump speeds and CPU heat loads. A Python optimizer then scans the results to find, for each heat load, the lowest-power pump speed that still keeps the CPU under a defined thermal safety limit.
+Built a coupled fluid-thermal model in MATLAB Simscape (pump → coolant loop → cold plate → CPU thermal mass), validated every governing relationship against hand calculations, then used Python (`matlab.engine`) to automate a full parameter sweep across pump speeds and CPU heat loads. A Python analysis then scans the results to find, for each heat load, the lowest-power pump speed that still keeps the CPU under a defined thermal safety limit.
 
 **Result:**
 Across the tested heat load range, pump power required to stay thermally safe scales dramatically — from under 2W at light loads up to several hundred watts as heat load approaches the design's cooling limit. The model correctly identifies both the power-limited regime (where the pump's own minimum speed is already sufficient) and the thermally-limited regime (where speed must actively increase to hold temperature under the safety line).
@@ -28,9 +28,10 @@ Across the tested heat load range, pump power required to stay thermally safe sc
 | MATLAB | R2024a | Simulation environment |
 | Simscape (Thermal Liquid + Thermal domains) | R2024a | Physics-based pump, coolant, and heat transfer modeling |
 | Python | 3.11 | Automation, optimization, plotting |
-| `matlab.engine` | 24.1 | Python ↔ MATLAB bridge |
+| `matlab.engine` | 24.1 | Python ↔ MATLAB bridge (only needed to re-run the sweep) |
 | pandas / numpy | latest | Data handling |
 | matplotlib | latest | Result visualization |
+| pytest | latest | Tests for the analysis code |
 
 ---
 
@@ -73,15 +74,19 @@ Every governing relationship was checked against hand calculations before being 
 
 ### 3. Test scenarios
 
-- **Full factorial sweep:** 12 CPU heat loads (40–500 W) × 11 pump speeds (40–350 rad/s, restricted to the pump's confirmed valid operating region — see Limitations), run automatically via Python
+- **Full factorial sweep:** 12 CPU heat loads (40–500 W) × 8 pump speeds (40–200 rad/s, restricted to the pump's confirmed valid operating region — see Limitations) = 96 simulations, run automatically via Python
 - **Optimization:** for each heat load, minimum pump power subject to CPU temperature remaining under 368.15 K (95°C)
+
+### 4. Post-processing
+
+Pump hydraulic power is `P = Δp · V̇`, from the pressure rise across the pump and the volumetric flow (`ṁ / ρ`). It depends only on pump speed, not on heat load, because the fluid side is independent of the thermal side in this model. `analysis.pump_power_curve` checks that assumption on the data instead of assuming it.
 
 ---
 
 ## Results
 
-**Key plots:**
-Temperature vs. pump speed for every tested heat load, with the thermal safety limit overlaid and each heat load's optimal (minimum-power, thermally-safe) point circled.
+**Key plot:**
+Temperature vs. pump speed for every tested heat load, with the thermal safety limit overlaid and each heat load's optimal (minimum-power, thermally-safe) point circled (top of this page).
 
 **Quantified comparison:**
 
@@ -94,7 +99,7 @@ Temperature vs. pump speed for every tested heat load, with the thermal safety l
 | 450 | 200 | 366.3 | 368.4 |
 | 500 | — | — | no speed in the tested range kept CPU temperature under the safety limit |
 
-Pump power required to stay thermally safe rises **over 200×** between the power-limited regime (40–150 W) and the thermally-limited regime's upper end (450 W) — the central quantified finding of the project.
+Pump power required to stay thermally safe rises **over 200×** between the power-limited regime (40–150 W) and the thermally-limited regime's upper end (450 W) — the central quantified finding of the project. Full table: `results/optimization_results.csv`.
 
 **Honest limitations:**
 - The convective coefficient correlation (`h = C·ṁ^0.8`) is a calibrated approximation, not derived from cold-plate channel geometry — real fidelity would require CFD or a manufacturer datasheet
@@ -107,6 +112,46 @@ Pump power required to stay thermally safe rises **over 200×** between the powe
 
 ## Repository Structure
 
+```
+├── models/
+│   └── server_cooling_loop_v2_working.slx      # Simscape model
+├── src/cooling_optimizer/
+│   ├── config.py        # paths, sweep grid, thermal limit, model block names
+│   ├── simulation.py    # runs the sweep through the MATLAB Engine (only module that needs MATLAB)
+│   ├── analysis.py      # pump power, minimum-power feasible speed per heat load
+│   └── plotting.py      # trade-off and pump-power figures
+├── scripts/
+│   ├── run_sweep.py               # 1. simulate the full grid  -> results/sweep_results.csv
+│   ├── optimize.py                # 2. find optimal points      -> results/optimization_results.csv
+│   ├── plot_results.py            # 3. make the figures         -> results/*.png
+│   └── check_matlab_connection.py # smoke test for the MATLAB Engine setup
+├── tests/test_analysis.py         # unit tests + checks against the committed sweep
+├── results/
+└── README.md
+```
+
+---
+
+## How to Run
+
+```bash
+# 1. Create and activate a Python 3.11 virtual environment
+#    (required for MATLAB R2024a's matlab.engine compatibility)
+
+# 2. Install the package and its dependencies
+pip install -e ".[test]"
+
+# 3. Run the tests (no MATLAB needed)
+pytest
+
+# 4. Re-run the analysis on the committed sweep (no MATLAB needed)
+python scripts/optimize.py
+python scripts/plot_results.py
+
+# 5. Only to regenerate the sweep itself: install the MATLAB Engine API for Python
+#    (run from <MATLAB_ROOT>/extern/engines/python), then
+python scripts/check_matlab_connection.py
+python scripts/run_sweep.py
 ```
 ├── models/
 │   └── server_cooling_loop_v2_working.slx
@@ -134,15 +179,11 @@ Pump power required to stay thermally safe rises **over 200×** between the powe
 # 2. Install dependencies
 pip install numpy pandas matplotlib
 
-# 3. Install the MATLAB Engine API for Python
-#    (run from <MATLAB_ROOT>/extern/engines/python)
+---
 
-# 4. Run the pipeline
-python scripts/sweep_pump_speed.py       # full parameter sweep
-python scripts/optimize.py               # find minimum-power feasible points
-python scripts/compute_optimal_power.py  # record pump power at optimal points
-python scripts/plot_final_tradeoff.py    # generate the annotated trade-off plot
-```
+## Code Cleanup (September 2026)
+
+The Simscape model, the sweep design, the analysis logic and the results are my own work. In September 2026 I restructured the Python code from standalone scripts into a small package (shared config and analysis module, command-line scripts, tests) using Claude Code, Anthropic's coding assistant. The restructured analysis was checked against the original outputs: it selects the same optimal pump speed and CPU temperature for every heat load, and pump power matches to the rounding of the original CSVs. The simulation module was ported from the original `sweep_run.py` and has not been re-run since the restructuring. The original scripts remain in the `main` branch history.
 
 ---
 
