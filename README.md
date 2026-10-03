@@ -153,6 +153,31 @@ python scripts/plot_results.py
 python scripts/check_matlab_connection.py
 python scripts/run_sweep.py
 ```
+├── models/
+│   └── server_cooling_loop_v2_working.slx
+├── scripts/
+│   ├── sweep_pump_speed.py
+│   ├── optimize.py
+│   ├── compute_optimal_power.py
+│   └── plot_final_tradeoff.py
+├── results/
+│   ├── full_sweep_final.csv
+│   ├── optimization_results.csv
+│   ├── optimal_power.csv
+│   └── final_tradeoff_plot.png
+└── README.md
+```
+
+---
+
+## How to Run
+
+```bash
+# 1. Create and activate a Python 3.11 virtual environment
+#    (required for MATLAB R2024a's matlab.engine compatibility)
+
+# 2. Install dependencies
+pip install numpy pandas matplotlib
 
 ---
 
